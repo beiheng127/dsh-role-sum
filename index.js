@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { layout, qualityCheck, readItem, scanLibrary, snapshot, writeReport } from './library.js';
 
 let defineTool = (options) => options;
 try {
@@ -36,10 +37,12 @@ const OVERRIDE_PATH = join(HOME, '.dsh', 'role-sum-config.json');
 const DEFAULTS = {
   enabled: true,
   outputDir: 'role-sums',
+  personaDir: 'personas',
   cspSkillPath: '~/.dsh/skills/csp',
   python: 'python',
   preferMoegirl: true,
   maxResearchChars: 20000,
+  qualityRounds: 2,
 };
 
 function readJson(path, fallback) {
@@ -92,6 +95,9 @@ function run(bin, args, opts) {
         timeout: (opts && opts.timeout) || 120000,
         maxBuffer: 16 * 1024 * 1024,
         windowsHide: true,
+        // Windows 下 python 默认按 ANSI(GBK) 解码 argv，中文角色名会变乱码；
+        // PYTHONUTF8 让子进程强制 UTF-8，git 等其它命令不受影响。
+        env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       },
       (err, stdout, stderr) => {
         res({
@@ -143,8 +149,20 @@ function sendJson(res, code, body) {
   res.end(JSON.stringify(body));
 }
 
-function readBody(req) {
-  return new Promise((res) => {
+/** 造一条 llm 形状的 user 消息：followup 只认这一种，缺 role/id 会被静默丢掉 */
+function makeUserMessage(text) {
+  const id =
+    globalThis.crypto?.randomUUID?.() ||
+    'rs-' + Date.now().toString(36) + '-' + Math.random().toString(16).slice(2);
+  return Object.freeze({
+    id,
+    role: 'user',
+    content: Object.freeze([Object.freeze({ type: 'text', text: String(text) })]),
+    source: Object.freeze({ kind: 'plugin:dsh-role-sum' }),
+  });
+}
+
+function readBody(req) {  return new Promise((res) => {
     let raw = '';
     req.on('data', (c) => {
       raw += c;
@@ -162,11 +180,13 @@ export const Config =
   z &&
   z.object({
     enabled: z.boolean().default(true).description('启用角色总结插件'),
-    outputDir: z.string().default('role-sums').description('输出目录（相对工作区）'),
+    outputDir: z.string().default('role-sums').description('资产库根目录（相对工作区）'),
+    personaDir: z.string().default('personas').description('人格文档目录（把 SKILL.md 装进这里用）'),
     cspSkillPath: z.string().default('~/.dsh/skills/csp').description('csp skill 所在目录'),
     python: z.string().default('python').description('python 可执行文件'),
     preferMoegirl: z.boolean().default(true).description('优先萌娘百科'),
     maxResearchChars: z.number().default(20000).description('单次采集最多返回给模型的字符数'),
+    qualityRounds: z.number().default(2).description('更新/质检时允许反复修几轮'),
   });
 
 export function apply(ctx, rawConfig = {}) {
@@ -182,6 +202,78 @@ export function apply(ctx, rawConfig = {}) {
   const cspReady = () => existsSync(join(cspDir(), 'SKILL.md'));
   const script = (n) => join(cspDir(), 'scripts', n);
   const outputRoot = () => resolve(workspace(), cfg.outputDir || 'role-sums');
+
+  const paths = () =>
+    layout({ workspace: workspace(), outputDir: cfg.outputDir, personaDir: cfg.personaDir });
+  const dirOf = (slug) => join(paths().root, String(slug || ''));
+  const library = () => scanLibrary(paths().root);
+
+  const check = (slug) => {
+    const dir = dirOf(slug);
+    if (!existsSync(join(dir, 'SKILL.md'))) {
+      return { ok: false, error: '资产库里没有这个角色，或还没有 SKILL.md：' + slug };
+    }
+    const report = qualityCheck(dir);
+    writeReport(dir, report);
+    return { ok: true, dir, report };
+  };
+
+  const agentService = () => {
+    try {
+      return ctx.get?.('agents') || null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * 手动更新：开一个真实会话去搜新剧情，agent 自己改文档、自己跑质检。
+   * 旧版先快照进 history/，改坏了能翻回去。
+   */
+  const startUpdateSession = async (slug, focus) => {
+    const dir = dirOf(slug);
+    if (!existsSync(dir)) return { ok: false, error: '资产库里没有这个角色：' + slug };
+    if (!cspReady()) return { ok: false, error: 'csp skill 未安装，先装再更新' };
+    const agents = agentService();
+    if (!agents) return { ok: false, error: '宿主没提供 agents 服务，开不了对话' };
+    const snap = snapshot(dir);
+    const item = readItem(paths().root, slug);
+    const meta = item && item.manifest ? item.manifest : {};
+    const selection = (() => {
+      try {
+        return ctx.get?.('agentDefaultModel')?.currentSelection?.() || null;
+      } catch {
+        return null;
+      }
+    })();
+    const agentOptions = selection ? { provider: selection.provider, model: selection.model } : {};
+    const sessionId = 'role-sum-update-' + String(slug).replace(/[^A-Za-z0-9\u4e00-\u9fff-]/g, '-') + '-' + Date.now().toString(36);
+    const handle = await agents.create({ sessionId, meta: { cwd: workspace() }, agentOptions });
+    try {
+      await handle.agent?.whenIdle?.();
+    } catch {
+      /* ignore */
+    }
+    const prompt = [
+      '[角色档案更新任务]',
+      '目标角色：' + (meta.name || slug) + (meta.work ? '（' + meta.work + '）' : ''),
+      '档案目录：' + dir,
+      '上次覆盖到：' + (meta.coveredUntil || '未记录'),
+      focus ? '本次特别关注：' + focus : '',
+      '',
+      '按这个顺序做，别跳步：',
+      '1. 先调 role_sum_research 重新采集公开资料（萌娘百科优先，其次百科/BWiki/B站/Google），拿到的原文留在 references/raw/',
+      '2. 和现有 SKILL.md 逐条比对：只把「上次覆盖日期之后的新剧情/新语音/新设定」补进去，旧结论不要无故改写',
+      '3. 更新 manifest.json：updatedAt、coveredUntil、sources；旧的 SKILL.md 已经自动备份在 history/，写之前可以对照',
+      '4. 调 role_sum_check 跑质检，按 issues 一条条改，最多 ' + (Number(cfg.qualityRounds) || 2) + ' 轮，直到 level 是 ok',
+      '5. 实在没搜到新东西，就在文档里写「截至 <日期> 未见新增剧情」，别硬编。',
+      '全程中文，改完把「改了什么/没找到什么」一句话交代清楚。',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    handle.agent.followup(makeUserMessage(prompt));
+    return { ok: true, sessionId, snapshot: snap, dir, prompt };
+  };
 
   const saveConfig = (patch) => {
     const cur = { ...readJson(OVERRIDE_PATH, {}) };
@@ -246,10 +338,43 @@ export function apply(ctx, rawConfig = {}) {
     }
 
     if (cfg.preferMoegirl && existsSync(script('moegirl_api.py'))) {
-      const r = await run(py, [script('moegirl_api.py'), role, '--full'], { cwd: cspDir() });
-      const j = parseJsonLoose(r.stdout) || { ok: r.ok };
+      let r = await run(py, [script('moegirl_api.py'), role, '--full'], { cwd: cspDir() });
+      let j = parseJsonLoose(r.stdout) || { ok: r.ok };
+      const weak =
+        !j.ok ||
+        Number(j.extract_chars || 0) < 200 ||
+        /可以指|消歧义/.test(String(j.extract || '').slice(0, 200));
+      if (weak) {
+        // 撞上消歧义页（如「祀」→ 祀可以指…）时，带作品名再搜一次，按命中标题重取
+        const shortWork = String(work || '').replace(/^.*[：:]/, '').trim();
+        const q = shortWork ? role + ' ' + shortWork : role;
+        const s = await run(py, [script('moegirl_api.py'), q, '--search'], { cwd: cspDir() });
+        const sj = parseJsonLoose(s.stdout) || {};
+        const cands = Array.isArray(sj.candidates) ? sj.candidates : [];
+        const pick =
+          cands.find((c) => {
+            const t = typeof c === 'string' ? c : c.title || '';
+            return t.includes(role) && (!shortWork || t.includes(shortWork));
+          }) || (sj.resolved_title && sj.resolved_title !== role ? sj.resolved_title : null) || cands[0];
+        const title =
+          typeof pick === 'string' ? pick : pick && (pick.title || pick.resolved_title || '');
+        if (title) {
+          const r2 = await run(py, [script('moegirl_api.py'), title, '--full'], { cwd: cspDir() });
+          const j2 = parseJsonLoose(r2.stdout) || {};
+          if (j2.ok && Number(j2.extract_chars || 0) > Number(j.extract_chars || 0)) {
+            r = r2;
+            j = j2;
+            j.retried_title = title;
+          }
+        }
+      }
       writeJson(join(rawDir, 'moegirl.json'), j);
-      steps.push({ step: 'moegirl', ok: r.ok, resolved: j.resolved || j.title || '' });
+      steps.push({
+        step: 'moegirl',
+        ok: Boolean(j.ok),
+        resolved: j.resolved_title || j.resolved || j.title || '',
+        chars: Number(j.extract_chars || 0),
+      });
     }
 
     if (existsSync(script('bwiki_api.py'))) {
@@ -324,7 +449,61 @@ export function apply(ctx, rawConfig = {}) {
     'role_sum_list',
     '列出已经生成的角色人格文档目录（<输出目录>/<slug>/SKILL.md）',
     { type: 'object', properties: {}, additionalProperties: false },
-    async () => JSON.stringify({ root: outputRoot(), items: listOutputs() }, null, 2),
+    async () =>
+      JSON.stringify({ root: paths().root, personaRoot: paths().personaRoot, ...library() }, null, 2),
+  );
+
+  tool(
+    'role_sum_check',
+    '质检一份角色人格文档是否符合角色背景与人设：检查来源、检索日期、知识边界、台词样本、可溯源性。返回分数与待修清单，改完可再查，直到 level=ok。',
+    {
+      type: 'object',
+      properties: { slug: { type: 'string', description: '资产库里的角色文件夹名，例如 祀-明日方舟-终末地' } },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const slug = String(args.slug || '').trim();
+      if (!slug) return '缺少 slug（用 role_sum_list 看有哪些）';
+      const r = check(slug);
+      if (!r.ok) return r.error;
+      const rep = r.report;
+      const lines = [
+        '质检：' + slug,
+        '分数 ' + rep.score + '（' + rep.level + '），错误 ' + rep.errorCount + ' / 警告 ' + rep.warnCount,
+        '目录：' + r.dir,
+      ];
+      if (rep.issues.length) {
+        lines.push('待修：');
+        for (const i of rep.issues) lines.push('- [' + i.level + '] ' + i.message + ' → ' + i.hint);
+      } else {
+        lines.push('全部通过，可以装进 personas/ 用了。');
+      }
+      return lines.join('\n');
+    },
+  );
+
+  tool(
+    'role_sum_library',
+    '看角色资产库：每个角色一行（名字、作品、字数、资料覆盖到哪天、质检分数、版本数）。',
+    { type: 'object', properties: {}, additionalProperties: false },
+    async () => {
+      const lib = library();
+      const lines = ['资产库：' + lib.root, '共 ' + lib.items.length + ' 个角色'];
+      for (const it of lib.items) {
+        lines.push(
+          [
+            '· ' + it.slug,
+            it.work ? '作品 ' + it.work : '作品未记录',
+            it.chars + ' 字',
+            '资料到 ' + (it.coveredUntil || '未记录'),
+            it.quality ? '质检 ' + it.quality.score + '(' + it.quality.level + ')' : '未质检',
+            it.versions + ' 个历史版本',
+          ].join(' | '),
+        );
+      }
+      return lines.join('\n');
+    },
   );
 
   // ---- 系统提示 ----
@@ -355,10 +534,37 @@ export function apply(ctx, rawConfig = {}) {
           config: cfg,
           workspace: workspace(),
           outputRoot: outputRoot(),
+          paths: paths(),
           cspDir: cspDir(),
           cspReady: cspReady(),
           outputs: listOutputs(),
+          libraryCount: library().items.length,
         });
+      }
+
+      if (req.method === 'GET' && path === '/library') {
+        return sendJson(res, 200, { ok: true, ...library(), agentReady: Boolean(agentService()) });
+      }
+
+      if (req.method === 'GET' && path === '/item') {
+        const slug = String(url.searchParams.get('slug') || '').trim();
+        const item = slug ? readItem(paths().root, slug) : null;
+        if (!item) return sendJson(res, 404, { ok: false, error: '没有这个角色：' + slug });
+        return sendJson(res, 200, { ok: true, ...item });
+      }
+
+      if (req.method === 'POST' && path === '/check') {
+        const body = await readBody(req);
+        return sendJson(res, 200, check(String(body.slug || '').trim()));
+      }
+
+      if (req.method === 'POST' && path === '/update') {
+        if (!cfg.enabled) return sendJson(res, 400, { ok: false, error: '插件未启用' });
+        const body = await readBody(req);
+        const slug = String(body.slug || '').trim();
+        if (!slug) return sendJson(res, 400, { ok: false, error: '缺少 slug' });
+        const r = await startUpdateSession(slug, String(body.focus || '').trim());
+        return sendJson(res, r.ok ? 200 : 400, r);
       }
 
       if (req.method === 'POST' && path === '/config') {
