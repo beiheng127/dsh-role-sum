@@ -1,0 +1,24 @@
+{
+  "name": "dsh-role-sum",
+  "version": "0.1.0",
+  "description": "角色总结插件：二次元角色 / 真人的资料采集 + 人格文档生成（基于 Character_Skill_Producer 工作流）",
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js", "./client": "./client.js", "./package.json": "./package.json" },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "README.md", "skills"],
+  "engines": { "node": ">=20.0.0" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ]
+    }
+  },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/beiheng127/dsh-role-sum.git" },
+  "homepage": "https://github.com/beiheng127/dsh-role-sum"
+}

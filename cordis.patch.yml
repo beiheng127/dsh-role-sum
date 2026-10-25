@@ -1,0 +1,4 @@
+# dsh-role-sum：角色总结（资料采集 + 人格文档）
+- insert:
+    - id: role-sum
+      name: dsh-role-sum
