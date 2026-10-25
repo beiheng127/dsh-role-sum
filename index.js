@@ -48,6 +48,7 @@ const OVERRIDE_PATH = join(HOME, '.dsh', 'role-sum-config.json');
 
 const DEFAULTS = {
   enabled: true,
+  workspace: '',
   outputDir: 'role-sums',
   personaDir: 'personas',
   cspSkillPath: '~/.dsh/skills/csp',
@@ -192,6 +193,7 @@ export const Config =
   z &&
   z.object({
     enabled: z.boolean().default(true).description('启用角色总结插件'),
+    workspace: z.string().default('').description('工作区根目录（绝对路径；留空则用宿主给的工作区）'),
     outputDir: z.string().default('role-sums').description('资产库根目录（相对工作区）'),
     personaDir: z.string().default('personas').description('人格文档目录（把 SKILL.md 装进这里用）'),
     cspSkillPath: z.string().default('~/.dsh/skills/csp').description('csp skill 所在目录'),
@@ -213,10 +215,16 @@ export function apply(ctx, rawConfig = {}) {
   const cspDir = () => expandHome(cfg.cspSkillPath);
   const cspReady = () => existsSync(join(cspDir(), 'SKILL.md'));
   const script = (n) => join(cspDir(), 'scripts', n);
-  const outputRoot = () => resolve(workspace(), cfg.outputDir || 'role-sums');
+  // 宿主给的是 profile 目录（…\.dsh\profiles\desktop），不是用户工作区；
+  // 所以这里优先用配置里的绝对路径，填了才算数。
+  const workspaceRoot = () => {
+    const w = String(cfg.workspace || '').trim();
+    return w ? expandHome(w) : workspace();
+  };
+  const outputRoot = () => resolve(workspaceRoot(), cfg.outputDir || 'role-sums');
 
   const paths = () =>
-    layout({ workspace: workspace(), outputDir: cfg.outputDir, personaDir: cfg.personaDir });
+    layout({ workspace: workspaceRoot(), outputDir: cfg.outputDir, personaDir: cfg.personaDir });
   const dirOf = (slug) => join(paths().root, String(slug || ''));
   const library = () => scanLibrary(paths().root);
 
@@ -260,7 +268,7 @@ export function apply(ctx, rawConfig = {}) {
     })();
     const agentOptions = selection ? { provider: selection.provider, model: selection.model } : {};
     const sessionId = 'role-sum-update-' + String(slug).replace(/[^A-Za-z0-9\u4e00-\u9fff-]/g, '-') + '-' + Date.now().toString(36);
-    const handle = await agents.create({ sessionId, meta: { cwd: workspace() }, agentOptions });
+    const handle = await agents.create({ sessionId, meta: { cwd: workspaceRoot() }, agentOptions });
     try {
       await handle.agent?.whenIdle?.();
     } catch {
@@ -310,7 +318,7 @@ export function apply(ctx, rawConfig = {}) {
     const agentOptions = selection ? { provider: selection.provider, model: selection.model } : {};
     const sessionId =
       'role-sum-persona-' + String(slug).replace(/[^A-Za-z0-9\u4e00-\u9fff-]/g, '-') + '-' + Date.now().toString(36);
-    const handle = await agents.create({ sessionId, meta: { cwd: workspace() }, agentOptions });
+    const handle = await agents.create({ sessionId, meta: { cwd: workspaceRoot() }, agentOptions });
     try {
       await handle.agent?.whenIdle?.();
     } catch {
@@ -705,7 +713,7 @@ export function apply(ctx, rawConfig = {}) {
         return sendJson(res, 200, {
           ok: true,
           config: cfg,
-          workspace: workspace(),
+          workspace: workspaceRoot(),
           outputRoot: outputRoot(),
           paths: paths(),
           cspDir: cspDir(),

@@ -346,6 +346,10 @@ function registerRoleSum() {
           ),
 
           h('div', { 'data-rs-h': '' }, '目录'),
+          h(Field, {
+            label: '工作区根目录',
+            note: '资产库和 personas 都相对它算。填绝对路径，例如 C:\\Users\\ruia3\\Documents\\deepseek-harness\\default-workspace；留空就用宿主给的那个（可能指到 profile 目录，不建议）',
+          }, h('input', { 'data-rs-input': '', value: form.workspace || '', onChange: (e) => set('workspace', e.target.value) })),
           h(Field, { label: '资产库根目录', note: '相对工作区；每个角色一个子文件夹，删除的东西进 _trash/' },
             h('input', { 'data-rs-input': '', value: form.outputDir || '', onChange: (e) => set('outputDir', e.target.value) })),
           h(Field, { label: '人格文档目录', note: 'persona.md 装进这里，就是子人格能直接读的文件' },
