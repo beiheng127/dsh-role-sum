@@ -11,7 +11,19 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { layout, qualityCheck, readItem, scanLibrary, snapshot, writeReport } from './library.js';
+import {
+  addSource,
+  deleteItem,
+  installPersona,
+  layout,
+  listSources,
+  qualityCheck,
+  readItem,
+  removeSource,
+  scanLibrary,
+  snapshot,
+  writeReport,
+} from './library.js';
 
 let defineTool = (options) => options;
 try {
@@ -275,6 +287,62 @@ export function apply(ctx, rawConfig = {}) {
     return { ok: true, sessionId, snapshot: snap, dir, prompt };
   };
 
+  /**
+   * 生成人设文档：把资产库里的 SKILL.md + 全部资料再蒸馏成一份「能直接给对话用」的短人设，
+   * 写进 <slug>/persona.md；之后再一键装进 personas/ 给子人格用。
+   */
+  const startPersonaSession = async (slug, opts = {}) => {
+    const dir = dirOf(slug);
+    if (!existsSync(join(dir, 'SKILL.md'))) return { ok: false, error: '资产库里没有这个角色的 SKILL.md：' + slug };
+    const agents = agentService();
+    if (!agents) return { ok: false, error: '宿主没提供 agents 服务，开不了对话' };
+    snapshot(dir);
+    const item = readItem(paths().root, slug);
+    const meta = (item && item.manifest) || {};
+    const fileName = String(opts.fileName || slug).replace(/\.md$/i, '');
+    const selection = (() => {
+      try {
+        return ctx.get?.('agentDefaultModel')?.currentSelection?.() || null;
+      } catch {
+        return null;
+      }
+    })();
+    const agentOptions = selection ? { provider: selection.provider, model: selection.model } : {};
+    const sessionId =
+      'role-sum-persona-' + String(slug).replace(/[^A-Za-z0-9\u4e00-\u9fff-]/g, '-') + '-' + Date.now().toString(36);
+    const handle = await agents.create({ sessionId, meta: { cwd: workspace() }, agentOptions });
+    try {
+      await handle.agent?.whenIdle?.();
+    } catch {
+      /* ignore */
+    }
+    const outFile = join(dir, 'persona.md');
+    const prompt = [
+      '[人设文档生成任务]',
+      '角色：' + (meta.name || slug) + (meta.work ? '（' + meta.work + '）' : ''),
+      '资产库目录：' + dir,
+      '',
+      '先读这些再动笔：SKILL.md、manifest.json、references/raw/ 与 references/manual/ 里全部原文、sources.json。',
+      '目标：1500~2500 字的短人设，给对话里的子人格用。它不是档案摘要，它回答「怎么扮演她」。',
+      '写进 ' + outFile + '，结构固定：',
+      '# ' + fileName,
+      '> 一句话：她跟别人到底哪儿不一样',
+      '## 她是谁（3~5 句，只留会影响说话方式的设定）',
+      '## 运行核心（3~5 条行为铁律，判断句，不要形容词堆砌）',
+      '## 表达质感（句长、语气词、称呼、什么时候收着）',
+      '## 台词样本（官方原文优先，每条标来源；没有原文的标「蒸馏」）',
+      '## 什么时候上（什么语境切她）',
+      '## 绝不做（会把人设演崩的点）',
+      '## 诚实边界（资料覆盖到哪天、什么不知道）',
+      '',
+      '规矩：只写有来源的东西；推理标注「推测」；不要整段照抄 SKILL.md。',
+      '写完调 role_sum_check（slug 用 ' + slug + '）看分数，低于 80 就按 issues 改。',
+      '最后回一句：名字 + 字数 + 质检分。',
+    ].join('\n');
+    handle.agent.followup(makeUserMessage(prompt));
+    return { ok: true, sessionId, dir, file: outFile, prompt };
+  };
+
   const saveConfig = (patch) => {
     const cur = { ...readJson(OVERRIDE_PATH, {}) };
     for (const k of Object.keys(DEFAULTS)) if (patch && k in patch) cur[k] = patch[k];
@@ -506,6 +574,111 @@ export function apply(ctx, rawConfig = {}) {
     },
   );
 
+  tool(
+    'role_sum_source_add',
+    '给某个角色手动挂一条资料（角色-来源）：标题 + 链接 / 备注 / 原文。原文会落进 references/manual/，质检溯源才算得上。',
+    {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: '角色文件夹名，例如 祀-明日方舟-终末地' },
+        title: { type: 'string', description: '资料标题，例如「干员档案·祀」' },
+        url: { type: 'string', description: '来源链接（可空）' },
+        note: { type: 'string', description: '备注：为什么加它（可空）' },
+        content: { type: 'string', description: '原文正文（可空，但贴了才有溯源码）' },
+      },
+      required: ['slug', 'title'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const slug = String(args.slug || '').trim();
+      if (!slug) return '缺少 slug';
+      if (!existsSync(dirOf(slug))) return '资产库里没有这个角色：' + slug;
+      return JSON.stringify(addSource(dirOf(slug), args), null, 2);
+    },
+  );
+
+  tool(
+    'role_sum_source_list',
+    '列出一个角色已经挂上的资料（手动加的来源 + 自动采集的原文份数）。',
+    {
+      type: 'object',
+      properties: { slug: { type: 'string', description: '角色文件夹名' } },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const slug = String(args.slug || '').trim();
+      const dir = dirOf(slug);
+      if (!existsSync(dir)) return '资产库里没有这个角色：' + slug;
+      const list = listSources(dir);
+      const lines = ['资料：' + slug, '手动 ' + list.length + ' 条'];
+      for (const s of list) {
+        lines.push('· [' + s.id + '] ' + s.title + (s.url ? ' | ' + s.url : '') + (s.chars ? ' | ' + s.chars + ' 字' : ' | 无正文'));
+      }
+      return lines.join('\n');
+    },
+  );
+
+  tool(
+    'role_sum_source_remove',
+    '摘掉一个角色某条手动资料（按 id），对应的原文文件一起删。',
+    {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: '角色文件夹名' },
+        id: { type: 'string', description: '资料 id，用 role_sum_source_list 查' },
+      },
+      required: ['slug', 'id'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const dir = dirOf(String(args.slug || '').trim());
+      if (!existsSync(dir)) return '资产库里没有这个角色';
+      return JSON.stringify(removeSource(dir, String(args.id || '').trim()), null, 2);
+    },
+  );
+
+  tool(
+    'role_sum_delete',
+    '删掉一个角色（整个文件夹搬到 <资产库>/_trash/，不是真删）。必须显式传 confirm=true。',
+    {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: '角色文件夹名' },
+        confirm: { type: 'boolean', description: '确认删除，必须传 true' },
+      },
+      required: ['slug', 'confirm'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      if (args.confirm !== true) return '删除要先确认：传 confirm=true 再叫我一次';
+      return JSON.stringify(deleteItem(paths().root, String(args.slug || '').trim()), null, 2);
+    },
+  );
+
+  tool(
+    'role_sum_persona',
+    '把资产库里的资料再蒸馏成一份短人设文档（persona.md）；install=true 时把它装进 personas/ 目录给子人格用。',
+    {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: '角色文件夹名' },
+        install: { type: 'boolean', description: 'true = 不再生成，直接把现有 persona.md 装进 personas/' },
+        fileName: { type: 'string', description: '装进去的文件名，例如 07-祀.md（可空）' },
+      },
+      required: ['slug'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const slug = String(args.slug || '').trim();
+      if (!slug) return '缺少 slug';
+      if (args.install) {
+        return JSON.stringify(installPersona(dirOf(slug), paths().personaRoot, args.fileName || slug + '.md'), null, 2);
+      }
+      return JSON.stringify(await startPersonaSession(slug, { fileName: args.fileName }), null, 2);
+    },
+  );
+
   // ---- 系统提示 ----
   try {
     const systemPrompt = ctx.get?.('systemPrompt');
@@ -564,6 +737,42 @@ export function apply(ctx, rawConfig = {}) {
         const slug = String(body.slug || '').trim();
         if (!slug) return sendJson(res, 400, { ok: false, error: '缺少 slug' });
         const r = await startUpdateSession(slug, String(body.focus || '').trim());
+        return sendJson(res, r.ok ? 200 : 400, r);
+      }
+
+      if (req.method === 'GET' && path === '/sources') {
+        const slug = String(url.searchParams.get('slug') || '').trim();
+        if (!slug) return sendJson(res, 400, { ok: false, error: '缺少 slug' });
+        return sendJson(res, 200, { ok: true, slug, sources: listSources(dirOf(slug)) });
+      }
+
+      if (req.method === 'POST' && path === '/source') {
+        const body = await readBody(req);
+        const slug = String(body.slug || '').trim();
+        if (!slug) return sendJson(res, 400, { ok: false, error: '缺少 slug' });
+        if (!existsSync(dirOf(slug))) return sendJson(res, 404, { ok: false, error: '没有这个角色：' + slug });
+        if (body.action === 'remove') return sendJson(res, 200, removeSource(dirOf(slug), String(body.id || '')));
+        return sendJson(res, 200, addSource(dirOf(slug), body));
+      }
+
+      if (req.method === 'POST' && path === '/delete') {
+        const body = await readBody(req);
+        const slug = String(body.slug || '').trim();
+        if (!slug) return sendJson(res, 400, { ok: false, error: '缺少 slug' });
+        if (body.confirm !== true) return sendJson(res, 400, { ok: false, error: '删除要先确认（confirm: true）' });
+        return sendJson(res, 200, deleteItem(paths().root, slug));
+      }
+
+      if (req.method === 'POST' && path === '/persona') {
+        if (!cfg.enabled) return sendJson(res, 400, { ok: false, error: '插件未启用' });
+        const body = await readBody(req);
+        const slug = String(body.slug || '').trim();
+        if (!slug) return sendJson(res, 400, { ok: false, error: '缺少 slug' });
+        if (body.action === 'install') {
+          const fileName = String(body.fileName || slug + '.md');
+          return sendJson(res, 200, installPersona(dirOf(slug), paths().personaRoot, fileName));
+        }
+        const r = await startPersonaSession(slug, { fileName: body.fileName });
         return sendJson(res, r.ok ? 200 : 400, r);
       }
 

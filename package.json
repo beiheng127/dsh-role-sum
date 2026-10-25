@@ -1,7 +1,7 @@
 {
   "name": "dsh-role-sum",
-  "version": "0.2.0",
-  "description": "DSH 角色人格总结插件：萌娘百科优先采集 + csp 固定工作流 + 资产库/质检/手动更新",
+  "version": "0.3.0",
+  "description": "DSH 角色人格总结插件：萌娘百科优先采集 + CSP 固定工作流 + 资产库/质检/手动更新 + 资料增删 + 人设联动",
   "type": "module",
   "main": "index.js",
   "exports": {
