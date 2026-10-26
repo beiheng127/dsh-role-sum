@@ -189,9 +189,26 @@ function readBody(req) {  return new Promise((res) => {
 export const name = 'dsh-role-sum';
 export const inject = ['tools', 'systemPrompt', 'webServer'];
 
-export const Config =
-  z &&
-  z.object({
+/**
+ * schemastery 缺失时**不要**把 Config 导成 null。宿主 settings 服务里是这样判断的：
+ *   schema(entry) { const s = entry.fiber?.runtime?.Config; return s !== undefined && 'toJSON' in s ? s : undefined; }
+ * Config = null 时 `'toJSON' in null` 直接抛 TypeError，
+ * 整个 settings/describe 失败 → 桌面端启动即报 desktop welcome: Web RPC failed，应用进不去。
+ * 所以退化成一个最小 standard-schema：不接管校验，但形状合法。
+ */
+const FallbackConfig = {
+  '~standard': {
+    version: 1,
+    vendor: 'dsh-role-sum',
+    validate(value) {
+      const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      return { value: { ...DEFAULTS, ...input } };
+    },
+  },
+};
+
+export const Config = z
+  ? z.object({
     enabled: z.boolean().default(true).description('启用角色总结插件'),
     workspace: z.string().default('').description('工作区根目录（绝对路径；留空则用宿主给的工作区）'),
     outputDir: z.string().default('role-sums').description('资产库根目录（相对工作区）'),
@@ -201,7 +218,8 @@ export const Config =
     preferMoegirl: z.boolean().default(true).description('优先萌娘百科'),
     maxResearchChars: z.number().default(20000).description('单次采集最多返回给模型的字符数'),
     qualityRounds: z.number().default(2).description('更新/质检时允许反复修几轮'),
-  });
+    })
+  : FallbackConfig;
 
 export function apply(ctx, rawConfig = {}) {
   let cfg = { ...DEFAULTS, ...(rawConfig || {}), ...readJson(OVERRIDE_PATH, {}) };

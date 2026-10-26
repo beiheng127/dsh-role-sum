@@ -2,6 +2,27 @@
 
 DSH 插件：二次元角色（或真人）人格总结。采集公开资料 → 按 [csp](https://github.com/qian-gugugaga/Character_Skill_Producer) 固定工作流蒸馏成可复用的人格文档，并长期管理这些文档。
 
+## 已知崩溃与修复（0.3.2）
+
+**症状**：插件启用后重启，桌面端弹 `desktop welcome: Web RPC failed`，应用进不去。
+
+**根因**：宿主设置服务里是这样取插件 schema 的（`@deepseek-ai/dsh-settings/lib/types/index.js`）：
+
+```js
+schema(entry) {
+  const schema = entry.fiber?.runtime?.Config;
+  return schema !== undefined && 'toJSON' in schema ? schema : undefined;
+}
+```
+
+`@deepseek-ai/schemastery` 是可选 peer，装不上时旧代码 `export const Config = z && z.object({...})`
+会导出 `null`，于是 `'toJSON' in null` 抛 `TypeError: Cannot use 'in' operator to search for 'toJSON' in null`，
+`settings/describe` 整个 RPC 失败 → 桌面端开窗即崩。
+
+**修法**：schemastery 缺失时退化成最小 standard-schema（有 `~standard.validate`，
+没有 `toJSON`，设置服务会干净地跳过它），不再导出 `null`；
+另外在本机 `node_modules/@deepseek-ai/schemastery` 建了到 profile 的 junction，设置表单照常有。
+
 ## 比裸 skill 多了什么
 
 | 能力 | 说明 |
