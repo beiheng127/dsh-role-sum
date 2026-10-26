@@ -13,6 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   addSource,
+  createItem,
   deleteItem,
   installPersona,
   layout,
@@ -808,6 +809,29 @@ export function apply(ctx, rawConfig = {}) {
 
       if (req.method === 'POST' && path === '/install-skill') {
         return sendJson(res, 200, await installSkill());
+      }
+
+      if (req.method === 'POST' && path === '/create') {
+        if (!cfg.enabled) return sendJson(res, 400, { ok: false, error: '插件未启用' });
+        const body = await readBody(req);
+        const role = String(body.role || '').trim();
+        const work = String(body.work || '').trim();
+        if (!role) return sendJson(res, 400, { ok: false, error: '缺少角色名' });
+        const made = createItem(paths().root, { role, work });
+        if (!made.ok) return sendJson(res, 409, made);
+        let research = null;
+        if (body.research !== false) {
+          if (!cspReady()) {
+            research = { ok: false, error: 'csp skill 没装，先建了空档案；装好后再点采集' };
+          } else {
+            try {
+              research = { ok: true, ...(await collect(role, work)) };
+            } catch (e) {
+              research = { ok: false, error: String((e && e.message) || e) };
+            }
+          }
+        }
+        return sendJson(res, 200, { ok: true, ...made, research, item: readItem(paths().root, made.slug) });
       }
 
       if (req.method === 'POST' && path === '/research') {

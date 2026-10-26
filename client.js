@@ -92,6 +92,7 @@ function registerRoleSum() {
         const [busy, setBusy] = React.useState('');
         const [delArm, setDelArm] = React.useState('');
         const [src, setSrc] = React.useState({ title: '', url: '', note: '', content: '' });
+        const [nr, setNr] = React.useState({ role: '', work: '' });
 
         const load = async () => {
           try {
@@ -110,6 +111,7 @@ function registerRoleSum() {
 
         const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
         const setS = (k, v) => setSrc((s) => ({ ...s, [k]: v }));
+        const setN = (k, v) => setNr((s) => ({ ...s, [k]: v }));
 
         const run = async (tag, fn) => {
           setErr('');
@@ -137,6 +139,29 @@ function registerRoleSum() {
             const r = await jpost('/install-skill');
             setMsg(r.ok ? r.message || '安装完成' : '安装失败：' + (r.error || ''));
             await load();
+          });
+
+        const newRole = (research) =>
+          run('new:' + (research ? 'r' : 'e'), async () => {
+            const role = String(nr.role || '').trim();
+            const work = String(nr.work || '').trim();
+            if (!role) throw new Error('先写角色名');
+            setMsg(research ? '建档中，正在采集资料，可能要几十秒…' : '建档中…');
+            const r = await jpost('/create', { role, work, research });
+            if (!r.ok) throw new Error(r.error || '建档失败');
+            const steps = r.research && Array.isArray(r.research.steps) ? r.research.steps : [];
+            const detail = steps
+              .map((s) => s.step + (s.ok ? '✓' : '✗') + (s.chars ? '(' + s.chars + '字)' : ''))
+              .join(' ');
+            setMsg(
+              '已建 ' + r.slug +
+                (r.research && r.research.ok ? '，采集：' + (detail || '完成') : '') +
+                (r.research && !r.research.ok ? '，' + (r.research.error || '没采集到') : ''),
+            );
+            setNr({ role: '', work: '' });
+            await load();
+            setOpen(r.slug);
+            setItem(await jget('/item?slug=' + encodeURIComponent(r.slug)));
           });
 
         const openItem = (slug) =>
@@ -382,6 +407,34 @@ function registerRoleSum() {
 
           h('div', { 'data-rs-sec': '' },
             h('div', { 'data-rs-h': '' }, '资产库（' + (lib.items || []).length + '）'),
+            h('div', { 'data-rs-new': '' },
+              h('div', { 'data-rs-h': '' }, '新增角色'),
+              h('div', { 'data-rs-row': '' },
+                h('input', {
+                  'data-rs-input': '',
+                  placeholder: '角色名，例如 芙宁娜',
+                  value: nr.role,
+                  onChange: (e) => setN('role', e.target.value),
+                }),
+                h('input', {
+                  'data-rs-input': '',
+                  placeholder: '所属作品，例如 原神（可空）',
+                  value: nr.work,
+                  onChange: (e) => setN('work', e.target.value),
+                }),
+                h('button', {
+                  'data-rs-btn': '',
+                  'data-primary': '',
+                  disabled: busy === 'new:r' || busy === 'new:e',
+                  onClick: () => newRole(true),
+                }, busy === 'new:r' ? '采集资料…' : '新建并采集资料'),
+                h('button', {
+                  'data-rs-btn': '',
+                  disabled: busy === 'new:r' || busy === 'new:e',
+                  onClick: () => newRole(false),
+                }, busy === 'new:e' ? '建档…' : '只建空档案')),
+              h('div', { 'data-rs-note': '' },
+                '建完就进下面的库。采集会跑 csp 脚本（萌百优先），要几十秒；想以后自己挂资料就选「只建空档案」')),
             (lib.items || []).length
               ? h('div', { 'data-rs-list': '' }, lib.items.map(libRow))
               : h('div', { 'data-rs-note': '' }, '还没有生成过角色，先在对话里让它采集一个')),

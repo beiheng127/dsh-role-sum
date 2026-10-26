@@ -1,6 +1,6 @@
 {
   "name": "dsh-role-sum",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "DSH 角色人格总结插件：资产库/质检/手动更新/资料增删/人设联动；工作区路径可配置",
   "type": "module",
   "main": "index.js",

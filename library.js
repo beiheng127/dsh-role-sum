@@ -197,6 +197,65 @@ export function deleteItem(root, slug) {
   return { ok: true, from: dir, to };
 }
 
+/** 新建一个角色文件夹（空档案）：先搭骨架，资料以后再采集或手动挂 */
+export function createItem(root, { role, work } = {}) {
+  const name = String(role || '').trim();
+  if (!name) return { ok: false, error: '缺少角色名' };
+  const w = String(work || '').trim();
+  const slug = slugify(name + (w ? '-' + w : ''));
+  const dir = join(root, slug);
+  if (existsSync(dir)) {
+    return { ok: false, error: '资产库里已经有这个角色了：' + slug, slug, dir, existed: true };
+  }
+  const now = new Date().toISOString();
+  mkdirSync(join(dir, 'references', 'raw'), { recursive: true });
+  mkdirSync(join(dir, 'references', 'manual'), { recursive: true });
+  writeJson(join(dir, 'manifest.json'), {
+    name,
+    work: w,
+    slug,
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+    coveredUntil: '',
+    stage: 'new',
+    note: '新建的空档案，还没采集资料',
+  });
+  writeJson(join(dir, 'sources.json'), []);
+  writeFileSync(
+    join(dir, 'SKILL.md'),
+    [
+      '# ' + name,
+      '',
+      '> 所属作品：' + (w || '未注明'),
+      '> 建档：' + now.slice(0, 10) + '（空档案，等待采集资料）',
+      '',
+      '## 一、基本事实',
+      '',
+      '- 待补充：身份、年龄、所属、出场作品',
+      '',
+      '## 二、语言指纹',
+      '',
+      '- 待补充：自称、称呼别人、口癖、句长习惯',
+      '',
+      '## 三、知识边界',
+      '',
+      '- 待补充：她/他知道什么、绝对不知道什么',
+      '',
+      '## 四、台词样本',
+      '',
+      '- 待补充：3~8 条原台词，标来源',
+      '',
+      '## 五、来源',
+      '',
+      '- 待补充：每条事实对应哪份资料、什么时候检索的',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  return { ok: true, slug, dir, created: true };
+}
+
 /** 资产库总览 */
 export function scanLibrary(root) {
   let dirs = [];
